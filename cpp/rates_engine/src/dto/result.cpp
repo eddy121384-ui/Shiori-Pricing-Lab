@@ -458,9 +458,36 @@ InputsIdentity InputsIdentity::from_canonical(const CanonicalValue& node, const 
   result.resolved_swap_product_id = require_text(node.at("resolved_swap_product_id", pointer),
                                                  child(pointer, "resolved_swap_product_id"),
                                                  "string resolved swap product id");
-  result.convention_set_id = require_text(node.at("convention_set_id", pointer),
-                                          child(pointer, "convention_set_id"),
-                                          "string convention set id");
+  // docs/33 section 12.2 line 932: the value comes "from ResolvedSwap provenance", and
+  // ResolvedSwap::from_canonical decodes it through the closed ConventionSetId vocabulary. Decoding it
+  // here through the same vocabulary means a result cannot echo a convention set no valid
+  // RATES_KERNEL_INPUT_V1 could have consumed. The wire string is kept verbatim.
+  const ConventionSetId convention_set = enum_from_canonical<ConventionSetId>(
+      node.at("convention_set_id", pointer), child(pointer, "convention_set_id"));
+  result.convention_set_id = std::string(enum_to_token(convention_set));
+  // Sections 12.2/13.2: `curve_role_map` is the exact echo of `RatesKernelInput.curve_selection`, whose
+  // forecast_curve_by_index key set must EQUAL {resolved_swap.floating_index} (kernel_input.cpp,
+  // section 5.1), and USD_SOFR_OIS_V1 denotes floating_index=USD_SOFR (docs/32 section 6, enforced by
+  // ResolvedSwap::from_canonical). The echo is held to the same rule with the same refusal kinds: an
+  // absent required key is a missing required field, any other key set is an invariant violation.
+  if (convention_set == ConventionSetId::kUsdSofrOisV1) {
+    const std::string required_forecast_index(enum_to_token(FloatingIndex::kUsdSofr));
+    const std::string forecast_pointer =
+        child(child(pointer, "curve_role_map"), "forecast_curve_by_index");
+    const auto& forecast = result.curve_role_map.forecast_curve_by_index;
+    if (forecast.find(required_forecast_index) == forecast.end()) {
+      fail(ContractViolationKind::kMissingRequiredField,
+           pointer_child(forecast_pointer, required_forecast_index),
+           "curve_role_map must echo the forecast curve the kernel input selected for the resolved "
+           "swap's floating index; a result never invents or omits a selection");
+    }
+    if (forecast.size() != 1) {
+      fail(ContractViolationKind::kInvariantViolation, forecast_pointer,
+           "curve_role_map must echo exactly the resolved swap's floating index in "
+           "forecast_curve_by_index; a selection for an index the product does not consume cannot "
+           "come from a valid kernel input");
+    }
+  }
   result.resolved_swap_schema_version =
       require_text(node.at("resolved_swap_schema_version", pointer),
                    child(pointer, "resolved_swap_schema_version"), "string schema version token");

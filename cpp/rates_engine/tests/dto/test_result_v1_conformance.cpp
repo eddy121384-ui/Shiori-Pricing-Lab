@@ -22,6 +22,8 @@
 // object rather than an invented node vocabulary.
 #include <gtest/gtest.h>
 
+#include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1211,6 +1213,100 @@ TEST(RiskResultCurveRoleMap, RefusesAMissingDiscountCurveIdEvenWhenRehashed) {
       with_discount_curve_id(risk_result_fixture().to_canonical(), std::nullopt);
   expect_refusal(decode_risk_result(document), ContractViolationKind::kMissingRequiredField,
                  "/inputs_identity/curve_role_map/discount_curve_id");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The result echo cannot name a convention set or a forecast selection no valid
+// RATES_KERNEL_INPUT_V1 could have consumed: `convention_set_id` is decoded through the closed
+// ConventionSetId vocabulary (docs/33 line 932, "from ResolvedSwap provenance"), and the forecast
+// key set must equal {USD_SOFR}, the single floating index USD_SOFR_OIS_V1 denotes (docs/32 section 6)
+// and the kernel's curve_selection requires (docs/33 section 5.1). Every negative fixture is
+// re-hashed so the refusal comes from the rule under test, never from the fingerprint fence.
+// ---------------------------------------------------------------------------------------------
+namespace {
+constexpr std::string_view kFixtureUnknownConventionSetId = "SYNTHETIC_NOT_A_CONVENTION_SET";
+constexpr std::string_view kFixtureOtherForecastCurveId = "SYNTHETIC_CONTRACT_FIXTURE_FORECAST_CURVE_2";
+
+void set_forecast_selection(InputsIdentity& identity,
+                            std::map<std::string, std::string> forecast_curve_by_index) {
+  identity.curve_role_map.forecast_curve_by_index = std::move(forecast_curve_by_index);
+}
+
+[[nodiscard]] std::string usd_sofr_key() { return std::string(enum_to_token(FloatingIndex::kUsdSofr)); }
+[[nodiscard]] std::string eur_estr_key() { return std::string(enum_to_token(FloatingIndex::kEurEstr)); }
+
+void expect_both_results_refuse(const std::function<void(InputsIdentity&)>& mutate,
+                                ContractViolationKind kind, const std::string& pointer) {
+  PricingResult pricing = successful_pricing_result(Currency::kUsd);
+  mutate(pricing.inputs_identity);
+  assign_derived_identities(pricing);
+  ASSERT_EQ(pricing.replay.content_fingerprint, pricing_result_content_fingerprint(pricing));
+  expect_refusal(decode_pricing_result(pricing.to_canonical()), kind, pointer);
+
+  RiskResult risk = risk_result_fixture();
+  mutate(risk.inputs_identity);
+  assign_derived_identities(risk);
+  ASSERT_EQ(risk.replay.content_fingerprint, risk_result_content_fingerprint(risk));
+  expect_refusal(decode_risk_result(risk.to_canonical()), kind, pointer);
+}
+}  // namespace
+
+TEST(ResultInputsIdentityKernelEcho, AcceptsTheV1ConventionSetAndTheExactForecastSelection) {
+  const PricingResult pricing = successful_pricing_result(Currency::kUsd);
+  const RiskResult risk = risk_result_fixture();
+  for (const InputsIdentity* identity : {&pricing.inputs_identity, &risk.inputs_identity}) {
+    EXPECT_EQ(identity->convention_set_id,
+              std::string(enum_to_token(ConventionSetId::kUsdSofrOisV1)));
+    ASSERT_EQ(identity->curve_role_map.forecast_curve_by_index.size(), 1U);
+    EXPECT_EQ(identity->curve_role_map.forecast_curve_by_index.count(usd_sofr_key()), 1U);
+  }
+
+  const CanonicalValue pricing_document = pricing.to_canonical();
+  const Refusal pricing_refusal = decode_pricing_result(pricing_document);
+  EXPECT_FALSE(pricing_refusal.refused) << pricing_refusal.pointer << ": " << pricing_refusal.message;
+  EXPECT_EQ(PricingResult::from_canonical(pricing_document, "").to_canonical().dump(),
+            pricing_document.dump());
+
+  const CanonicalValue risk_document = risk.to_canonical();
+  const Refusal risk_refusal = decode_risk_result(risk_document);
+  EXPECT_FALSE(risk_refusal.refused) << risk_refusal.pointer << ": " << risk_refusal.message;
+  EXPECT_EQ(RiskResult::from_canonical(risk_document, "").to_canonical().dump(),
+            risk_document.dump());
+}
+
+TEST(ResultInputsIdentityKernelEcho, RefusesAnUnknownConventionSetAfterRehash) {
+  expect_both_results_refuse(
+      [](InputsIdentity& identity) {
+        identity.convention_set_id = std::string(kFixtureUnknownConventionSetId);
+      },
+      ContractViolationKind::kUnknownEnumToken, "/inputs_identity/convention_set_id");
+}
+
+TEST(ResultInputsIdentityKernelEcho, RefusesAnEmptyForecastSelectionAfterRehash) {
+  expect_both_results_refuse(
+      [](InputsIdentity& identity) { set_forecast_selection(identity, {}); },
+      ContractViolationKind::kMissingRequiredField,
+      "/inputs_identity/curve_role_map/forecast_curve_by_index/" + usd_sofr_key());
+}
+
+TEST(ResultInputsIdentityKernelEcho, RefusesAForecastSelectionForAnotherIndexOnlyAfterRehash) {
+  expect_both_results_refuse(
+      [](InputsIdentity& identity) {
+        set_forecast_selection(identity, {{eur_estr_key(), std::string(kFixtureForecastCurveId)}});
+      },
+      ContractViolationKind::kMissingRequiredField,
+      "/inputs_identity/curve_role_map/forecast_curve_by_index/" + usd_sofr_key());
+}
+
+TEST(ResultInputsIdentityKernelEcho, RefusesAnExtraUnconsumedForecastIndexAfterRehash) {
+  expect_both_results_refuse(
+      [](InputsIdentity& identity) {
+        set_forecast_selection(identity,
+                               {{usd_sofr_key(), std::string(kFixtureForecastCurveId)},
+                                {eur_estr_key(), std::string(kFixtureOtherForecastCurveId)}});
+      },
+      ContractViolationKind::kInvariantViolation,
+      "/inputs_identity/curve_role_map/forecast_curve_by_index");
 }
 
 // ---------------------------------------------------------------------------------------------
