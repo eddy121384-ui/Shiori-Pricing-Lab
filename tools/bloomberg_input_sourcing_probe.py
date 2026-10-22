@@ -769,7 +769,22 @@ _SCRUBBED_OVERRIDE_VALUE = "<redacted override value>"
 # additions below are widened defensively; see
 # `tests/test_bloomberg_input_sourcing_probe.py`'s synthetic regression
 # tests for exactly what each one now catches.
-_HOST_PORT_PATTERN = re.compile(r"\b[A-Za-z0-9_.-]+:\d{2,5}\b")
+# A host:port token must *look* like a host. The previous body
+# (`[A-Za-z0-9_.-]+`) treated `-` and digits as host characters, so it matched
+# the time-of-day inside every ISO-8601 timestamp and destroyed it:
+# `2026-01-01T00:00:00Z` came out as `<redacted host>:00Z`, and
+# `2026-07-28T00:00:01+00:00` as `<redacted host>:01+<redacted host>`. That is
+# a false positive on the one piece of text these probes most need to report
+# faithfully -- when the probe ran, and what date the vendor said the data was
+# for. Restricting the host body to a letter-initial name (which `my-host` and
+# `bbg-host.local` still satisfy) or a dotted-quad IPv4 keeps every real
+# host:port shape redacted while leaving timestamps and clock times alone.
+# Known narrow gap, accepted deliberately: a digit-initial non-IPv4 hostname
+# (`3com:8194`) is no longer caught here. The bare-IPv4 pattern below still
+# covers IPs, and a hostname of that shape has never appeared in this repo.
+_HOST_PORT_PATTERN = re.compile(
+    r"\b(?:[A-Za-z][A-Za-z0-9_.-]*|(?:\d{1,3}\.){3}\d{1,3}):\d{2,5}\b"
+)
 _BARE_IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _PATH_PATTERN = re.compile(
     r"(?:[A-Za-z]:\\[^\s\"']+|\\\\[^\s\"']+|/(?:home|Users|users|root|var|tmp|opt)/[^\s\"']+)"
