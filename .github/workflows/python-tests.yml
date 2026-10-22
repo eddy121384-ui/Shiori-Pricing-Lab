@@ -78,3 +78,29 @@ jobs:
           cd /d "%SMOKE_TEST_DIR%"
           call start_shiori.bat --no-browser
           if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+
+  windows-bootstrapper:
+    # Issue #206: the coworker-facing download is a Windows executable compiled
+    # by csc.exe from the in-box .NET Framework. Nothing is installed to build
+    # it, so this job needs no SDK step -- but the deterministic install,
+    # integrity-refusal and warm-launch behaviour can only be proven by running
+    # the real binary, which the Linux `test` job skips.
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install -e .
+
+      - name: Run the bootstrapper tests against the real compiled executable
+        run: pytest tests/test_government_bond_futures_converter_bootstrapper.py -v
