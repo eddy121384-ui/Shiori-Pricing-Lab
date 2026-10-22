@@ -1,0 +1,453 @@
+#include "shiori_rates/diagnostics/runtime_telemetry.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "shiori_rates/dto/canonical.hpp"
+#include "shiori_rates/dto/codec_traits.hpp"
+#include "shiori_rates/dto/error.hpp"
+#include "shiori_rates/dto/fingerprint.hpp"
+#include "shiori_rates/dto/units.hpp"
+
+namespace Shiori::rates::diagnostics {
+
+namespace {
+
+using dto::CanonicalMembers;
+using dto::CanonicalValue;
+
+[[nodiscard]] std::string require_text(const CanonicalValue& node, const std::string& pointer,
+                                       const char* what) {
+  if (!node.is_string()) {
+    dto::fail_wrong_type(pointer, what, node.type_name());
+  }
+  if (node.as_string().empty()) {
+    dto::fail(dto::ContractViolationKind::kInvariantViolation, pointer,
+              "field must not be empty");
+  }
+  return node.as_string();
+}
+
+[[nodiscard]] bool require_bool(const CanonicalValue& node, const std::string& pointer) {
+  if (!node.is_bool()) {
+    dto::fail_wrong_type(pointer, "boolean", node.type_name());
+  }
+  return node.as_bool();
+}
+
+[[nodiscard]] std::int64_t require_int(const CanonicalValue& node, const std::string& pointer) {
+  if (!node.is_integer()) {
+    dto::fail_wrong_type(pointer, "integer", node.type_name());
+  }
+  return node.as_integer();
+}
+
+// Every integer with |v| <= 2^53 is exact. Above that a value is exact exactly when it is a multiple of
+// the binary64 spacing at its magnitude: for |v| in [2^b, 2^(b+1)) the spacing is 2^(b-52), so the value
+// is representable iff its low (b-52) bits are zero. The check is integer-only - there is no double to
+// integer conversion anywhere, so there is no out-of-range/undefined cast near INT64_MIN/INT64_MAX.
+[[nodiscard]] bool integer_is_exactly_representable_as_binary64(std::int64_t value) noexcept {
+  constexpr std::int64_t kTwoTo53 = 9007199254740992LL;  // 2^53: exact for every integer at or below
+  if (value >= -kTwoTo53 && value <= kTwoTo53) {
+    return true;
+  }
+  // INT64_MIN is handled without overflow: -(value + 1) is a legal negation, then the +1 restores the
+  // magnitude in the unsigned domain.
+  const std::uint64_t magnitude = value < 0
+                                      ? static_cast<std::uint64_t>(-(value + 1)) + 1U
+                                      : static_cast<std::uint64_t>(value);
+  unsigned exponent = 0;  // floor(log2(magnitude)); >= 53 because the early return handles |v| <= 2^53
+  for (std::uint64_t probe = magnitude; probe > 1U; probe >>= 1U) {
+    ++exponent;
+  }
+  // The binary64 spacing at magnitude 2^e is 2^(e - 52), so the value is exact exactly when its low
+  // (e - 52) bits are zero. e is in [53, 63] here, so the shift is always in range for a 64-bit mask.
+  const unsigned dropped_bits = exponent - 52U;
+  return (magnitude & ((std::uint64_t{1} << dropped_bits) - 1U)) == 0U;
+}
+
+// The one decode rule for a double-valued field, exactly the rule the #225 DTO decoders apply
+// (`src/dto/numeric.cpp`, `market.cpp`, `result.cpp`): an integer node must be exactly representable as
+// binary64, a floating node is stored as-is. A non-exact integer is REFUSED at the field's own pointer
+// instead of being rounded, because the rounded value is not the number the document contains - and a
+// document carrying the fingerprint of the rounded value would then decode successfully while
+// reserialization changed the field. Kept as a file-local copy because the DTO modules deliberately
+// expose no shared floating-point codec.
+[[nodiscard]] double require_binary64_number(const CanonicalValue& node, const std::string& pointer) {
+  if (node.is_integer()) {
+    const std::int64_t raw = node.as_integer();
+    if (!integer_is_exactly_representable_as_binary64(raw)) {
+      dto::fail(dto::ContractViolationKind::kInvariantViolation, pointer,
+                "an integer-valued numeric field must be exactly representable as binary64; this "
+                "integer would be silently rounded, so the canonical field would not round-trip and "
+                "every identity derived from it would describe a different number");
+    }
+    return static_cast<double>(raw);
+  }
+  return node.as_double();
+}
+
+[[nodiscard]] const char* cache_state_token(dto::CacheState state) {
+  return dto::enum_to_token(state);
+}
+
+// The one documented stable Lane B identity derivation, shared by encode and decode so the two can
+// never drift apart: `telemetry_id = fingerprint_of("telemetry_version:content_fingerprint")`. It is
+// a function of the version and the content fingerprint alone, so it carries no wall-clock, address
+// or counter identity.
+[[nodiscard]] std::string derive_telemetry_id(const std::string& telemetry_version,
+                                              const std::string& content_fingerprint) {
+  return dto::fingerprint_of(CanonicalValue(telemetry_version + ":" + content_fingerprint));
+}
+
+}  // namespace
+
+CanonicalValue CacheLayerObservation::to_canonical() const {
+  CanonicalMembers members;
+  members.emplace_back("layer_id", CanonicalValue(layer_id));
+  members.emplace_back("state", CanonicalValue(std::string(cache_state_token(state))));
+  members.emplace_back("key_digest", CanonicalValue(key_digest));
+  members.emplace_back("lookups", CanonicalValue(lookups));
+  members.emplace_back("hits", CanonicalValue(hits));
+  members.emplace_back("misses", CanonicalValue(misses));
+  return CanonicalValue::make_object(std::move(members));
+}
+
+CanonicalValue ExecutionPathObservation::to_canonical() const {
+  CanonicalMembers members;
+  members.emplace_back("path_id", CanonicalValue(path_id));
+  members.emplace_back("served_from_cache", CanonicalValue(served_from_cache));
+  return CanonicalValue::make_object(std::move(members));
+}
+
+CanonicalValue GateObservation::to_canonical() const {
+  CanonicalMembers members;
+  members.emplace_back("mode", CanonicalValue(mode));
+  members.emplace_back("gate_id", CanonicalValue(gate_id));
+  members.emplace_back("acquisitions", CanonicalValue(acquisitions));
+  members.emplace_back("waits", CanonicalValue(waits));
+  members.emplace_back("reentrant_refusals", CanonicalValue(reentrant_refusals));
+  return CanonicalValue::make_object(std::move(members));
+}
+
+CanonicalValue PhaseTiming::to_canonical() const {
+  CanonicalMembers members;
+  members.emplace_back("phase_id", CanonicalValue(phase_id));
+  members.emplace_back("milliseconds", CanonicalValue(milliseconds));
+  return CanonicalValue::make_object(std::move(members));
+}
+
+std::string dependency_instrumentation_for_triplet(const std::string& vcpkg_triplet) {
+  // Source-backed only. The two pinned sanitizer triplets set the sanitizer flags for the ENTIRE
+  // dependency closure (triplets/x64-linux-shiori-tsan.cmake and x64-linux-shiori-asan.cmake set them in
+  // VCPKG_CXX_FLAGS/VCPKG_C_FLAGS/VCPKG_LINKER_FLAGS) and each owns a separate binary-cache identity
+  // (docs/34 line 375, section 5.7 T3 / section 11.3), so a non-instrumented dependency binary cannot be
+  // substituted silently under those triplet names. The
+  // token vocabulary matches `BuildIdentity.sanitizers` (THREAD / ADDRESS+UNDEFINED) for the two states
+  // that are actually evidenced.
+  //
+  // Nothing else is inferred: not from `build_sanitizers` (a Shiori-only sanitizer build says nothing
+  // about the dependency), not from the compiler, and not from missing evidence - which is reported as
+  // the explicit UNVERIFIED state rather than as "uninstrumented", because no runtime check here can
+  // prove the absence of instrumentation in a pre-built library.
+  if (vcpkg_triplet == "x64-linux-shiori-tsan") {
+    return "THREAD";
+  }
+  if (vcpkg_triplet == "x64-linux-shiori-asan") {
+    return "ADDRESS+UNDEFINED";
+  }
+  return "UNVERIFIED";
+}
+
+CanonicalValue MeasurementMetadata::to_canonical() const {
+  CanonicalMembers members;
+  members.emplace_back("engine_version", CanonicalValue(engine_version));
+  members.emplace_back("quantlib_version", CanonicalValue(quantlib_version));
+  members.emplace_back("quantlib_macro_configuration",
+                       CanonicalValue(quantlib_macro_configuration));
+  members.emplace_back("acquisition_mode", CanonicalValue(acquisition_mode));
+  members.emplace_back("vcpkg_baseline", CanonicalValue(vcpkg_baseline));
+  members.emplace_back("vcpkg_triplet", CanonicalValue(vcpkg_triplet));
+  members.emplace_back("dependency_instrumentation", CanonicalValue(dependency_instrumentation));
+  members.emplace_back("build_type", CanonicalValue(build_type));
+  members.emplace_back("build_sanitizers", CanonicalValue(build_sanitizers));
+  members.emplace_back("compiler", CanonicalValue(compiler));
+  members.emplace_back("numeric_flags", CanonicalValue(numeric_flags));
+  members.emplace_back("benchmark_name", CanonicalValue(benchmark_name));
+  members.emplace_back("fixture_id", CanonicalValue(fixture_id));
+  return CanonicalValue::make_object(std::move(members));
+}
+
+CanonicalValue RuntimeTelemetry::to_canonical() const {
+  CanonicalMembers members;
+  members.emplace_back("telemetry_version", CanonicalValue(telemetry_version));
+  members.emplace_back("telemetry_id", CanonicalValue(telemetry_id));
+  members.emplace_back("correlation_result_fingerprint",
+                       CanonicalValue(correlation_result_fingerprint));
+  members.emplace_back("correlation_inputs_fingerprint",
+                       CanonicalValue(correlation_inputs_fingerprint));
+  members.emplace_back("metadata", metadata.to_canonical());
+  dto::CanonicalItems layers;
+  layers.reserve(cache_layers.size());
+  for (const CacheLayerObservation& layer : cache_layers) {
+    layers.push_back(layer.to_canonical());
+  }
+  members.emplace_back("cache_layers", CanonicalValue::make_array(std::move(layers)));
+  members.emplace_back("execution_path", execution_path.to_canonical());
+  members.emplace_back("gate", gate.to_canonical());
+  dto::CanonicalItems phase_items;
+  phase_items.reserve(phases.size());
+  for (const PhaseTiming& phase : phases) {
+    phase_items.push_back(phase.to_canonical());
+  }
+  members.emplace_back("phases", CanonicalValue::make_array(std::move(phase_items)));
+  members.emplace_back("content_fingerprint", CanonicalValue(content_fingerprint));
+  return CanonicalValue::make_object(std::move(members));
+}
+
+RuntimeTelemetry RuntimeTelemetry::from_canonical(const CanonicalValue& node,
+                                                  const std::string& pointer) {
+  // Stage 1 (locked precedence): the wire version is read and validated BEFORE any other member, so a
+  // version-shape failure can never be masked by an unknown-key or a missing-field refusal, and V1 is
+  // never assumed. Lane B is versioned independently of the result documents, but it is still a
+  // versioned DTO entry point, so it owns the same fence: absent and non-string are VERSION failures,
+  // not a missing business field and not a wrong type. This mirrors `require_schema_version`, which
+  // cannot be reused here because its member name is fixed to `schema_version`.
+  const CanonicalValue* version_node = node.find("telemetry_version");
+  if (version_node == nullptr) {
+    dto::fail(dto::ContractViolationKind::kUnknownSchemaVersion,
+              dto::pointer_child(pointer, "telemetry_version"),
+              "wire version is absent; a document is never assumed to be V1");
+  }
+  if (!version_node->is_string()) {
+    std::string message = "wire version must be a string token, found ";
+    message += version_node->type_name();
+    dto::fail(dto::ContractViolationKind::kUnknownSchemaVersion,
+              dto::pointer_child(pointer, "telemetry_version"), std::move(message));
+  }
+  if (version_node->as_string() != "RATES_RUNTIME_TELEMETRY_V1") {
+    dto::fail(dto::ContractViolationKind::kUnknownSchemaVersion,
+              dto::pointer_child(pointer, "telemetry_version"),
+              "unknown telemetry version; Lane B is versioned independently of the result "
+              "documents");
+  }
+
+  // The version is recognised, so the approved shape is checked next. Unknown keys are still refused
+  // after the fence, and `telemetry_version` stays in the allowed set. The accepted document shape is
+  // unchanged: `RATES_RUNTIME_TELEMETRY_V1` is still the only accepted token.
+  dto::require_only_keys(node, pointer,
+                         {"telemetry_version", "telemetry_id", "correlation_result_fingerprint",
+                          "correlation_inputs_fingerprint", "metadata", "cache_layers",
+                          "execution_path", "gate", "phases", "content_fingerprint"});
+  RuntimeTelemetry result;
+  result.telemetry_version = version_node->as_string();
+  result.telemetry_id = require_text(node.at("telemetry_id", pointer),
+                                     dto::pointer_child(pointer, "telemetry_id"),
+                                     "string telemetry id");
+  result.correlation_result_fingerprint =
+      require_text(node.at("correlation_result_fingerprint", pointer),
+                   dto::pointer_child(pointer, "correlation_result_fingerprint"),
+                   "string result fingerprint correlation");
+  result.correlation_inputs_fingerprint =
+      require_text(node.at("correlation_inputs_fingerprint", pointer),
+                   dto::pointer_child(pointer, "correlation_inputs_fingerprint"),
+                   "string inputs fingerprint correlation");
+
+  const CanonicalValue& metadata_node = node.at("metadata", pointer);
+  dto::require_only_keys(metadata_node, dto::pointer_child(pointer, "metadata"),
+                         {"engine_version", "quantlib_version",
+                          "quantlib_macro_configuration", "acquisition_mode", "vcpkg_baseline",
+                          "vcpkg_triplet", "dependency_instrumentation", "build_type",
+                          "build_sanitizers", "compiler", "numeric_flags", "benchmark_name",
+                          "fixture_id"});
+  result.metadata.engine_version =
+      require_text(metadata_node.at("engine_version", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "engine_version"),
+                   "string engine version");
+  result.metadata.quantlib_version =
+      require_text(metadata_node.at("quantlib_version", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "quantlib_version"),
+                   "string quantlib version");
+  result.metadata.quantlib_macro_configuration =
+      require_text(metadata_node.at("quantlib_macro_configuration",
+                                    dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"),
+                                      "quantlib_macro_configuration"),
+                   "string quantlib macro configuration");
+  result.metadata.acquisition_mode =
+      require_text(metadata_node.at("acquisition_mode", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"),
+                                      "acquisition_mode"),
+                   "string acquisition mode");
+  result.metadata.vcpkg_baseline =
+      require_text(metadata_node.at("vcpkg_baseline", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "vcpkg_baseline"),
+                   "string vcpkg baseline");
+  result.metadata.vcpkg_triplet =
+      require_text(metadata_node.at("vcpkg_triplet", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "vcpkg_triplet"),
+                   "string vcpkg triplet");
+  result.metadata.dependency_instrumentation =
+      require_text(metadata_node.at("dependency_instrumentation",
+                                    dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"),
+                                      "dependency_instrumentation"),
+                   "string dependency instrumentation state");
+  result.metadata.build_type =
+      require_text(metadata_node.at("build_type", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "build_type"),
+                   "string build type");
+  result.metadata.build_sanitizers =
+      require_text(metadata_node.at("build_sanitizers", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "build_sanitizers"),
+                   "string build sanitizer mode");
+  result.metadata.compiler =
+      require_text(metadata_node.at("compiler", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "compiler"),
+                   "string compiler");
+  result.metadata.numeric_flags =
+      require_text(metadata_node.at("numeric_flags", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "numeric_flags"),
+                   "string numeric flags");
+  result.metadata.benchmark_name =
+      require_text(metadata_node.at("benchmark_name", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "benchmark_name"),
+                   "string benchmark name");
+  result.metadata.fixture_id =
+      require_text(metadata_node.at("fixture_id", dto::pointer_child(pointer, "metadata")),
+                   dto::pointer_child(dto::pointer_child(pointer, "metadata"), "fixture_id"),
+                   "string fixture id");
+
+  const CanonicalValue& layers_node = node.at("cache_layers", pointer);
+  if (!layers_node.is_array()) {
+    dto::fail_wrong_type(dto::pointer_child(pointer, "cache_layers"), "array",
+                         layers_node.type_name());
+  }
+  for (std::size_t index = 0; index < layers_node.as_array().items.size(); ++index) {
+    const std::string layer_pointer =
+        dto::pointer_index(dto::pointer_child(pointer, "cache_layers"), index);
+    const CanonicalValue& layer_node = layers_node.as_array().items[index];
+    dto::require_only_keys(layer_node, layer_pointer,
+                           {"layer_id", "state", "key_digest", "lookups", "hits", "misses"});
+    CacheLayerObservation layer;
+    layer.layer_id = require_text(layer_node.at("layer_id", layer_pointer),
+                                  dto::pointer_child(layer_pointer, "layer_id"),
+                                  "string layer id");
+    layer.state = dto::enum_from_canonical<dto::CacheState>(
+        layer_node.at("state", layer_pointer), dto::pointer_child(layer_pointer, "state"));
+    layer.key_digest = require_text(layer_node.at("key_digest", layer_pointer),
+                                    dto::pointer_child(layer_pointer, "key_digest"),
+                                    "string key digest");
+    layer.lookups = require_int(layer_node.at("lookups", layer_pointer),
+                                dto::pointer_child(layer_pointer, "lookups"));
+    layer.hits = require_int(layer_node.at("hits", layer_pointer),
+                             dto::pointer_child(layer_pointer, "hits"));
+    layer.misses = require_int(layer_node.at("misses", layer_pointer),
+                               dto::pointer_child(layer_pointer, "misses"));
+    result.cache_layers.push_back(std::move(layer));
+  }
+
+  const CanonicalValue& path_node = node.at("execution_path", pointer);
+  const std::string path_pointer = dto::pointer_child(pointer, "execution_path");
+  dto::require_only_keys(path_node, path_pointer, {"path_id", "served_from_cache"});
+  result.execution_path.path_id = require_text(path_node.at("path_id", path_pointer),
+                                               dto::pointer_child(path_pointer, "path_id"),
+                                               "string execution path id");
+  result.execution_path.served_from_cache = require_bool(
+      path_node.at("served_from_cache", path_pointer),
+      dto::pointer_child(path_pointer, "served_from_cache"));
+
+  const CanonicalValue& gate_node = node.at("gate", pointer);
+  const std::string gate_pointer = dto::pointer_child(pointer, "gate");
+  dto::require_only_keys(gate_node, gate_pointer,
+                         {"mode", "gate_id", "acquisitions", "waits", "reentrant_refusals"});
+  result.gate.mode = require_text(gate_node.at("mode", gate_pointer),
+                                  dto::pointer_child(gate_pointer, "mode"), "string gate mode");
+  result.gate.gate_id = require_text(gate_node.at("gate_id", gate_pointer),
+                                     dto::pointer_child(gate_pointer, "gate_id"),
+                                     "string gate id");
+  result.gate.acquisitions = require_int(gate_node.at("acquisitions", gate_pointer),
+                                         dto::pointer_child(gate_pointer, "acquisitions"));
+  result.gate.waits = require_int(gate_node.at("waits", gate_pointer),
+                                  dto::pointer_child(gate_pointer, "waits"));
+  result.gate.reentrant_refusals =
+      require_int(gate_node.at("reentrant_refusals", gate_pointer),
+                  dto::pointer_child(gate_pointer, "reentrant_refusals"));
+
+  const CanonicalValue& phases_node = node.at("phases", pointer);
+  if (!phases_node.is_array()) {
+    dto::fail_wrong_type(dto::pointer_child(pointer, "phases"), "array", phases_node.type_name());
+  }
+  for (std::size_t index = 0; index < phases_node.as_array().items.size(); ++index) {
+    const std::string phase_pointer =
+        dto::pointer_index(dto::pointer_child(pointer, "phases"), index);
+    const CanonicalValue& phase_node = phases_node.as_array().items[index];
+    dto::require_only_keys(phase_node, phase_pointer, {"phase_id", "milliseconds"});
+    PhaseTiming phase;
+    phase.phase_id = require_text(phase_node.at("phase_id", phase_pointer),
+                                  dto::pointer_child(phase_pointer, "phase_id"),
+                                  "string phase id");
+    const CanonicalValue& ms_node = phase_node.at("milliseconds", phase_pointer);
+    const std::string ms_pointer = dto::pointer_child(phase_pointer, "milliseconds");
+    if (!ms_node.is_float() && !ms_node.is_integer()) {
+      dto::fail_wrong_type(ms_pointer, "number", ms_node.type_name());
+    }
+    // An elapsed-time value is a double-valued DTO field like any other: an integer token is admitted
+    // only when binary64 holds it exactly, so a rounded reading can never be reported as the reading.
+    phase.milliseconds = require_binary64_number(ms_node, ms_pointer);
+    result.phases.push_back(std::move(phase));
+  }
+
+  result.content_fingerprint = require_text(node.at("content_fingerprint", pointer),
+                                           dto::pointer_child(pointer, "content_fingerprint"),
+                                           "string content fingerprint");
+  // The declared content fingerprint is verified against the recomputed preimage (which, per the
+  // non-recursive Lane B rule, excludes this document's own `content_fingerprint` and its own
+  // `telemetry_id`). A declared label is an input, never an authority.
+  const std::string recomputed_fingerprint = telemetry_content_fingerprint(result);
+  if (recomputed_fingerprint != result.content_fingerprint) {
+    dto::fail(dto::ContractViolationKind::kFingerprintMismatch,
+              dto::pointer_child(pointer, "content_fingerprint"),
+              "declared content_fingerprint does not match the recomputed canonical preimage");
+  }
+  // ... and then the derived label is verified independently with the SAME derivation the encoder
+  // used. Neither label is silently repaired, and because `telemetry_id` is excluded from the
+  // preimage above, a tampered id cannot be masked by the fingerprint check (nor the reverse).
+  if (result.telemetry_id !=
+      derive_telemetry_id(result.telemetry_version, recomputed_fingerprint)) {
+    dto::fail(dto::ContractViolationKind::kIdentityMismatch,
+              dto::pointer_child(pointer, "telemetry_id"),
+              "declared telemetry_id does not match the derived identity");
+  }
+  return result;
+}
+
+std::string telemetry_content_fingerprint(const RuntimeTelemetry& telemetry) {
+  // Locked non-recursive Lane B self-identity (Sophira owner decision 6117299766 section B): the
+  // content-fingerprint preimage excludes BOTH the document's own `content_fingerprint` AND its own
+  // derived `telemetry_id` — `telemetry_id` is derived from this fingerprint, so it cannot also be an
+  // input to it. Every other participating measurement/metadata/correlation field stays in the
+  // preimage: genuine timing, cache and gate observations are not suppressed.
+  CanonicalValue document = telemetry.to_canonical();
+  dto::CanonicalMembers members;
+  members.reserve(document.as_object().members.size());
+  for (const auto& member : document.as_object().members) {
+    if (member.first != "content_fingerprint" && member.first != "telemetry_id") {
+      members.push_back(member);
+    }
+  }
+  return dto::fingerprint_of(dto::CanonicalValue::make_object(std::move(members)));
+}
+
+void assign_derived_identities(RuntimeTelemetry& telemetry) {
+  telemetry.telemetry_version = "RATES_RUNTIME_TELEMETRY_V1";
+  // Fingerprint first, then the derived id, both from the same preimage rule the decoder verifies.
+  telemetry.content_fingerprint = telemetry_content_fingerprint(telemetry);
+  telemetry.telemetry_id =
+      derive_telemetry_id(telemetry.telemetry_version, telemetry.content_fingerprint);
+}
+
+}  // namespace Shiori::rates::diagnostics
