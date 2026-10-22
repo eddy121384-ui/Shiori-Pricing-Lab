@@ -1310,6 +1310,61 @@ TEST(ResultInputsIdentityKernelEcho, RefusesAnExtraUnconsumedForecastIndexAfterR
 }
 
 // ---------------------------------------------------------------------------------------------
+// docs/33 section 12.3: a PRESENT sign convention is the explicit token a signed value is read by, so a
+// PRESENT empty string - on the headline, on pv_sign_convention or on a component reference - names no
+// convention. The open vocabulary itself stays unvalidated; only the empty token is refused.
+// ---------------------------------------------------------------------------------------------
+namespace {
+[[nodiscard]] ComponentPv fixture_component(std::string sign_convention_ref) {
+  ComponentPv component;
+  component.component_id = "SYNTHETIC_CONTRACT_FIXTURE_COMPONENT";
+  component.value = 0.0;  // shape probe
+  component.unit = Unit::kCurrencyAmount;
+  component.sign_convention_ref = ValueOrReason<std::string>::of(std::move(sign_convention_ref));
+  return component;
+}
+
+void expect_rehashed_pricing_refusal(PricingResult result, const std::string& pointer) {
+  assign_derived_identities(result);
+  ASSERT_EQ(result.replay.content_fingerprint, pricing_result_content_fingerprint(result));
+  expect_refusal(decode_pricing_result(result.to_canonical()),
+                 ContractViolationKind::kInvariantViolation, pointer);
+}
+}  // namespace
+
+TEST(PricingResultSignConvention, AcceptsPresentNonEmptyTokensIncludingAComponentReference) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.component_pvs = ValueOrReason<std::vector<ComponentPv>>::of(
+      {fixture_component(std::string(kUnresolvedToken))});
+  assign_derived_identities(result);
+  const CanonicalValue document = result.to_canonical();
+  const Refusal refusal = decode_pricing_result(document);
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+  EXPECT_EQ(PricingResult::from_canonical(document, "").to_canonical().dump(), document.dump());
+}
+
+TEST(PricingResultSignConvention, RefusesEmptyHeadlineAndPvTokensEvenWhenTheyAgreeAfterRehash) {
+  // Both empty and therefore equal: the headline/pv agreement rule alone would accept this pair.
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.headline.value.sign_convention = ValueOrReason<std::string>::of(std::string());
+  result.pv_sign_convention = ValueOrReason<std::string>::of(std::string());
+  expect_rehashed_pricing_refusal(result, "/headline/value/sign_convention/value");
+}
+
+TEST(PricingResultSignConvention, RefusesAnEmptyPvSignConventionAfterRehash) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.pv_sign_convention = ValueOrReason<std::string>::of(std::string());
+  expect_rehashed_pricing_refusal(result, "/pv_sign_convention/value");
+}
+
+TEST(PricingResultSignConvention, RefusesAnEmptyComponentSignConventionReferenceAfterRehash) {
+  PricingResult result = successful_pricing_result(Currency::kUsd);
+  result.component_pvs =
+      ValueOrReason<std::vector<ComponentPv>>::of({fixture_component(std::string())});
+  expect_rehashed_pricing_refusal(result, "/component_pvs/value/0/sign_convention_ref/value");
+}
+
+// ---------------------------------------------------------------------------------------------
 // Finding 4 - the result input identity echoes the kernel applicability
 // docs/33 section 5.1 lines 305-307, section 12.4 line 962, section 13.4 line 1051.
 // ---------------------------------------------------------------------------------------------

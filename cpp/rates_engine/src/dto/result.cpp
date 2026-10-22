@@ -309,6 +309,16 @@ void require_status_warning_rule(PricingStatus status, const std::vector<Diagnos
   }
 }
 
+// Section 12.3: a PRESENT sign convention is the explicit token a consumer interprets a signed value
+// by, so an empty string names no convention. The open vocabulary itself stays unvalidated.
+void require_nonempty_sign_convention(const ValueOrReason<std::string>& sign_convention,
+                                      const std::string& pointer) {
+  if (sign_convention.present && sign_convention.value.empty()) {
+    fail(ContractViolationKind::kInvariantViolation, child(pointer, "value"),
+         "a PRESENT sign convention must be a nonempty token");
+  }
+}
+
 // docs/33 section 15.4 (line 1232): the canonical measure order is the approved tuple
 // `(measure_id, canonical bump_spec.bump_target serialization, canonical RiskBucketCoordinate
 // serialization)`, and a structured NOT_APPLICABLE sorts before PRESENT within each of the two
@@ -586,6 +596,7 @@ HeadlineValue HeadlineValue::from_canonical(const CanonicalValue& node, const st
                                                            child(pointer, "currency"));
   result.sign_convention = ValueOrReason<std::string>::from_canonical(
       node.at("sign_convention", pointer), child(pointer, "sign_convention"));
+  require_nonempty_sign_convention(result.sign_convention, child(pointer, "sign_convention"));
   // Section 12.3 (line 955) states currency applicability in both directions, and line 947 annotates
   // the field the same way: currency-denominated headline units require PRESENT(result_currency), while
   // dimensionless/rate headlines use structured NOT_APPLICABLE unless their approved unit explicitly
@@ -639,6 +650,7 @@ ComponentPv ComponentPv::from_canonical(const CanonicalValue& node, const std::s
   result.unit = enum_from_canonical<Unit>(node.at("unit", pointer), child(pointer, "unit"));
   result.sign_convention_ref = ValueOrReason<std::string>::from_canonical(
       node.at("sign_convention_ref", pointer), child(pointer, "sign_convention_ref"));
+  require_nonempty_sign_convention(result.sign_convention_ref, child(pointer, "sign_convention_ref"));
   return result;
 }
 
@@ -697,6 +709,7 @@ PricingResult PricingResult::from_canonical(const CanonicalValue& node, const st
                                                              child(pointer, "pv"));
   result.pv_sign_convention = ValueOrReason<std::string>::from_canonical(
       node.at("pv_sign_convention", pointer), child(pointer, "pv_sign_convention"));
+  require_nonempty_sign_convention(result.pv_sign_convention, child(pointer, "pv_sign_convention"));
   result.component_pvs = ValueOrReason<std::vector<ComponentPv>>::from_canonical(
       node.at("component_pvs", pointer), child(pointer, "component_pvs"));
   result.annuity_pvbp = ValueOrReason<NumericWithUnit>::from_canonical(

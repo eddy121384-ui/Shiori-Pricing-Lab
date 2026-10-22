@@ -87,6 +87,7 @@ using Shiori::rates::dto::ValueOrReason;
 using Shiori::rates::dto::ValueState;
 using Shiori::rates::dto::VolatilityInput;
 using Shiori::rates::dto::assign_derived_identities;
+using Shiori::rates::dto::compute_curve_identities;
 using Shiori::rates::dto::compute_fixing_store_identities;
 using Shiori::rates::dto::enum_to_token;
 using Shiori::rates::dto::not_applicable_reason;
@@ -1121,6 +1122,59 @@ TEST(FixingObservationStateConformance, RefusesAProjectedRecordWithAnEmptyMethod
   empty_method_version.projection_method_version = ValueOrReason<std::string>::of(std::string());
   expect_refused(empty_method_version, "/entries/0/projection_method_version",
                  "PROJECTED with a PRESENT empty projection method version");
+}
+
+TEST(FixingObservationStateConformance, RefusesAHistoricalRecordWithAnEmptySourceVersionAfterRehash) {
+  // Docs/33 line 586 requires a PRESENT source version on HISTORICAL, and section 8.6 makes it the
+  // source version / batch the authoritative fixing is traced to. A PRESENT empty string names none, so
+  // it is refused at its own field inside a re-hashed store; the same entry with a version is accepted.
+  const FixingEntry entry = make_historical_entry(FloatingIndex::kUsdSofr, "2024-01-11", "2024-01-12");
+  ASSERT_TRUE(entry.version.present);
+  ASSERT_FALSE(entry.version.value.empty());
+  const FixingStore accepted = make_fixing_store({entry}, {MarketSource::kSyntheticFixture});
+  const CanonicalValue accepted_encoded = accepted.to_canonical();
+  EXPECT_EQ(FixingStore::from_canonical(accepted_encoded, "").to_canonical().dump(),
+            accepted_encoded.dump());
+
+  FixingEntry empty_version = entry;
+  empty_version.version = ValueOrReason<std::string>::of(std::string());
+  const FixingStore store = make_fixing_store({empty_version}, {MarketSource::kSyntheticFixture});
+  ASSERT_EQ(compute_fixing_store_identities(store).content_fingerprint, store.content_fingerprint);
+  const CanonicalValue encoded = store.to_canonical();
+  const ContractViolation violation =
+      refusal_for([&encoded] { (void)FixingStore::from_canonical(encoded, ""); },
+                  "HISTORICAL with a PRESENT empty source version");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/entries/0/version");
+}
+
+TEST(CurveReferenceDateReason, RequiresANonEmptyExplanationForAnAlternateAnchorAfterRehash) {
+  // Docs/33 section 7.2: a reference_date different from valuation_date requires a PRESENT explanation.
+  // A PRESENT empty string leaves the alternate anchor unexplained, so the re-hashed curve is refused at
+  // the field; the same curve with a non-empty explanation is accepted.
+  const auto make_alternate_anchor_curve = [](std::string reason) {
+    DiscountCurve discount;
+    discount.common = make_curve_common(CurveRole::kDiscount, false);
+    discount.common.reference_date = Date(std::string("2024-01-12"));
+    discount.common.reference_date_reason = ValueOrReason<std::string>::of(std::move(reason));
+    Curve curve{std::move(discount)};
+    assign_derived_identities(curve);
+    return curve;
+  };
+
+  const Curve accepted = make_alternate_anchor_curve("FIXTURE_ALTERNATE_ANCHOR_EXPLANATION");
+  const CanonicalValue accepted_node = accepted.to_canonical();
+  EXPECT_EQ(Curve::from_canonical(accepted_node, "").to_canonical().dump(), accepted_node.dump());
+
+  const Curve empty_reason = make_alternate_anchor_curve(std::string());
+  ASSERT_EQ(compute_curve_identities(empty_reason).content_fingerprint,
+            empty_reason.common().content_fingerprint);
+  const CanonicalValue node = empty_reason.to_canonical();
+  const ContractViolation violation =
+      refusal_for([&node] { (void)Curve::from_canonical(node, ""); },
+                  "an alternate reference_date with a PRESENT empty explanation");
+  EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+  EXPECT_EQ(violation.pointer(), "/reference_date_reason");
 }
 
 TEST(FixingObservationStateConformance, RefusesAProjectedRecordWhoseSourceIsNotCurveProjection) {

@@ -517,13 +517,13 @@ CurveCommon curve_common_from_canonical(const CanonicalValue& node, const std::s
       break;
   }
   // Section 7.2: reference_date_reason is NOT_APPLICABLE when the dates agree, and PRESENT with an
-  // explicit explanation when they differ.
+  // explicit explanation when they differ. A PRESENT empty string explains nothing.
   if (result.reference_date.text == result.valuation_date.text) {
     (void)result.reference_date_reason.require_null_with_reason(
         child(pointer, "reference_date_reason"), ReasonCategory::kNotApplicable);
-  } else if (!result.reference_date_reason.present) {
+  } else if (!result.reference_date_reason.present || result.reference_date_reason.value.empty()) {
     fail(ContractViolationKind::kInvariantViolation, child(pointer, "reference_date_reason"),
-         "a reference_date different from valuation_date requires a PRESENT explanation");
+         "a reference_date different from valuation_date requires a PRESENT non-empty explanation");
   }
   return result;
 }
@@ -1163,9 +1163,10 @@ FixingEntry FixingEntry::from_canonical(const CanonicalValue& node, const std::s
              "BLOOMBERG_DAPI, SCREEN_TRANSCRIPTION and SYNTHETIC_FIXTURE; a research or other derived "
              "source is never an authoritative captured fixing");
       }
-      if (!result.version.present) {
+      // Section 8.6: every HISTORICAL entry names its source version / batch; an empty string names none.
+      if (!result.version.present || result.version.value.empty()) {
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "version"),
-             "a HISTORICAL observation requires a PRESENT source version");
+             "a HISTORICAL observation requires a PRESENT non-empty source version");
       }
       require_historical_projection_field(result.projection_method_id, pointer,
                                           "projection_method_id");
