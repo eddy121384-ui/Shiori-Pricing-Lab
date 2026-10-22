@@ -1081,6 +1081,48 @@ TEST(FixingObservationStateConformance, RefusesAProjectedRecordMissingItsProject
   EXPECT_EQ(reference_violation.pointer(), "/projection_inputs_ref");
 }
 
+TEST(FixingObservationStateConformance, RefusesAProjectedRecordWithAnEmptyMethodIdentityAfterRehash) {
+  // Docs/33 line 585: a PROJECTED record must carry its projection method id and version, and an
+  // unknown methodology may not be serialized as PROJECTED. A PRESENT empty string names no
+  // methodology, so it is refused at its own field even inside a re-hashed store whose declared
+  // fingerprint is self-consistent. The complete record on the forecast path (publication after the
+  // valuation date, line 611) is the positive control.
+  FixingEntry entry = make_entry(FloatingIndex::kUsdSofr, "2024-01-11");
+  entry.observation_state = ObservationState::kProjected;
+  entry.value = present_decimal_rate(kSyntheticDecimalRate);
+  entry.source = ValueOrReason<MarketSource>::of(MarketSource::kCurveProjection);
+  entry.quote_timestamp = ValueOrReason<Timestamp>::of(Timestamp(std::string(kCapturedAt)));
+  entry.projection_method_id = ValueOrReason<std::string>::of(std::string("FIXTURE_PROJECTION_METHOD"));
+  entry.projection_method_version = ValueOrReason<std::string>::of(std::string("FIXTURE_V0"));
+  entry.projection_inputs_ref = present_projection_reference("fixture-curve-set", "fixture-curve");
+  entry.publication_date = ValueOrReason<Date>::of(Date(std::string("2024-01-16")));
+
+  const FixingStore accepted = make_fixing_store({entry}, {MarketSource::kCurveProjection});
+  const CanonicalValue accepted_encoded = accepted.to_canonical();
+  EXPECT_EQ(FixingStore::from_canonical(accepted_encoded, "").to_canonical().dump(),
+            accepted_encoded.dump());
+
+  const auto expect_refused = [](const FixingEntry& mutated, const char* pointer, const char* what) {
+    const FixingStore store = make_fixing_store({mutated}, {MarketSource::kCurveProjection});
+    ASSERT_EQ(compute_fixing_store_identities(store).content_fingerprint, store.content_fingerprint);
+    const CanonicalValue encoded = store.to_canonical();
+    const ContractViolation violation =
+        refusal_for([&encoded] { (void)FixingStore::from_canonical(encoded, ""); }, what);
+    EXPECT_EQ(violation.kind(), ContractViolationKind::kInvariantViolation);
+    EXPECT_EQ(violation.pointer(), pointer);
+  };
+
+  FixingEntry empty_method_id = entry;
+  empty_method_id.projection_method_id = ValueOrReason<std::string>::of(std::string());
+  expect_refused(empty_method_id, "/entries/0/projection_method_id",
+                 "PROJECTED with a PRESENT empty projection method id");
+
+  FixingEntry empty_method_version = entry;
+  empty_method_version.projection_method_version = ValueOrReason<std::string>::of(std::string());
+  expect_refused(empty_method_version, "/entries/0/projection_method_version",
+                 "PROJECTED with a PRESENT empty projection method version");
+}
+
 TEST(FixingObservationStateConformance, RefusesAProjectedRecordWhoseSourceIsNotCurveProjection) {
   FixingEntry entry = make_entry(FloatingIndex::kUsdSofr, "2024-01-10");
   entry.observation_state = ObservationState::kProjected;

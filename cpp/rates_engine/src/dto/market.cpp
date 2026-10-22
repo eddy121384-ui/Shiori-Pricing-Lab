@@ -1188,13 +1188,16 @@ FixingEntry FixingEntry::from_canonical(const CanonicalValue& node, const std::s
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "source"),
              "a PROJECTED observation requires a PRESENT source=CURVE_PROJECTION");
       }
-      if (!result.projection_method_id.present) {
+      // A PRESENT empty string identifies no methodology, and line 585 keeps an unknown methodology off
+      // the PROJECTED state, so the method id and version must be PRESENT and non-empty.
+      if (!result.projection_method_id.present || result.projection_method_id.value.empty()) {
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_method_id"),
-             "a PROJECTED observation requires a PRESENT projection method id");
+             "a PROJECTED observation requires a PRESENT non-empty projection method id");
       }
-      if (!result.projection_method_version.present) {
+      if (!result.projection_method_version.present ||
+          result.projection_method_version.value.empty()) {
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_method_version"),
-             "a PROJECTED observation requires a PRESENT projection method version");
+             "a PROJECTED observation requires a PRESENT non-empty projection method version");
       }
       if (!result.projection_inputs_ref.present) {
         fail(ContractViolationKind::kInvariantViolation, child(pointer, "projection_inputs_ref"),
