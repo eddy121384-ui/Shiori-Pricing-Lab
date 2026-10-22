@@ -126,6 +126,27 @@ target_link_libraries(shiori_rates_quantlib_adapter
   PUBLIC shiori_rates_dto
   PRIVATE QuantLib::QuantLib)
 
+# docs/34 section 4.11 O5/O6: QuantLib must be COMPILED without OpenMP, which QL_ENABLE_OPENMP cannot
+# prove because three QuantLib pragma sites are bare. Before the adapter builds against it, the
+# prebuilt QuantLib library's own object code is inspected for OpenMP runtime references, and any
+# reference fails the build closed. The adapter's own translation unit refuses `_OPENMP` itself.
+set(_shiori_openmp_assertion "${CMAKE_CURRENT_SOURCE_DIR}/tests/ci/assert_library_without_openmp.cmake")
+set(_shiori_quantlib_openmp_stamp "${CMAKE_CURRENT_BINARY_DIR}/shiori_quantlib_without_openmp.stamp")
+add_custom_command(
+  OUTPUT "${_shiori_quantlib_openmp_stamp}"
+  COMMAND "${CMAKE_COMMAND}" "-DLIBRARY=$<TARGET_FILE:QuantLib::QuantLib>"
+          -P "${_shiori_openmp_assertion}"
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_shiori_quantlib_openmp_stamp}"
+  DEPENDS "$<TARGET_FILE:QuantLib::QuantLib>" "${_shiori_openmp_assertion}"
+  COMMENT "Verifying that QuantLib was compiled without OpenMP (docs/34 section 4.11 O5)"
+  VERBATIM)
+add_custom_target(shiori_quantlib_openmp_guard DEPENDS "${_shiori_quantlib_openmp_stamp}")
+get_target_property(_shiori_quantlib_built_target QuantLib::QuantLib ALIASED_TARGET)
+if(_shiori_quantlib_built_target)
+  add_dependencies(shiori_quantlib_openmp_guard ${_shiori_quantlib_built_target})
+endif()
+add_dependencies(shiori_rates_quantlib_adapter shiori_quantlib_openmp_guard)
+
 # =============================================================================================
 # shiori_rates_core — engine identity and the two schema operations #227 implements.
 # =============================================================================================
@@ -359,6 +380,20 @@ if(SHIORI_BUILD_TESTS)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ci/assert_provisioning_paths_are_ignored.cmake")
   set_tests_properties(ci_provisioning_identity_ignore PROPERTIES
     LABELS "identity" TIMEOUT 120)
+  # docs/34 section 4.11 O6: CI asserts the OpenMP-free QuantLib build on the produced binary. The
+  # canary is compiled WITH this toolchain's OpenMP flag and must be refused for the stated reason, so
+  # a clean QuantLib scan is proven to come from an assertion that can fail on this toolchain.
+  add_test(NAME quantlib_without_openmp
+    COMMAND "${CMAKE_COMMAND}" "-DLIBRARY=$<TARGET_FILE:QuantLib::QuantLib>"
+            -P "${_shiori_openmp_assertion}")
+  set_tests_properties(quantlib_without_openmp PROPERTIES LABELS "identity" TIMEOUT 120)
+  add_library(shiori_openmp_canary STATIC tests/ci/openmp_canary.cpp)
+  target_compile_options(shiori_openmp_canary PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/openmp,-fopenmp>)
+  add_test(NAME quantlib_without_openmp_canary
+    COMMAND "${CMAKE_COMMAND}" "-DLIBRARY=$<TARGET_FILE:shiori_openmp_canary>"
+            -P "${_shiori_openmp_assertion}")
+  set_tests_properties(quantlib_without_openmp_canary PROPERTIES
+    LABELS "identity" TIMEOUT 120 PASS_REGULAR_EXPRESSION "OpenMP code generation found")
 endif()
 
 # =============================================================================================

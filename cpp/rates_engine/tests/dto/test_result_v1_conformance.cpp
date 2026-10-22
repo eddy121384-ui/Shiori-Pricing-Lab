@@ -22,6 +22,8 @@
 // object rather than an invented node vocabulary.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cctype>
 #include <functional>
 #include <map>
 #include <optional>
@@ -103,17 +105,42 @@ constexpr std::string_view kFixtureSwaptionProductId = "SYNTHETIC_CONTRACT_FIXTU
 constexpr std::string_view kFixtureEngineName = "SYNTHETIC_CONTRACT_FIXTURE_ENGINE";
 constexpr std::string_view kFixtureEngineVersion = "SHAPE_ONLY_NOT_A_RELEASE";
 constexpr std::string_view kFixtureMethod = "SCHEMA_VALIDATION_ONLY";
-constexpr std::string_view kFixtureSnapshotId = "SYNTHETIC_CONTRACT_FIXTURE_SNAPSHOT";
-constexpr std::string_view kFixtureCurveSetId = "SYNTHETIC_CONTRACT_FIXTURE_CURVE_SET";
-constexpr std::string_view kFixtureDiscountCurveId = "SYNTHETIC_CONTRACT_FIXTURE_DISCOUNT_CURVE";
-constexpr std::string_view kFixtureForecastCurveId = "SYNTHETIC_CONTRACT_FIXTURE_FORECAST_CURVE";
-constexpr std::string_view kFixtureFixingStoreId = "SYNTHETIC_CONTRACT_FIXTURE_FIXING_STORE";
-constexpr std::string_view kFixtureVolatilityInputId = "SYNTHETIC_CONTRACT_FIXTURE_VOL_INPUT";
-constexpr std::string_view kFixtureOtherVolatilityInputId = "SYNTHETIC_CONTRACT_FIXTURE_VOL_INPUT_2";
-constexpr std::string_view kFixtureModelInputId = "SYNTHETIC_CONTRACT_FIXTURE_MODEL_INPUT";
-constexpr std::string_view kFixtureOtherModelInputId = "SYNTHETIC_CONTRACT_FIXTURE_MODEL_INPUT_2";
-constexpr std::string_view kFixtureExerciseTermsId = "SYNTHETIC_CONTRACT_FIXTURE_EXERCISE_TERMS";
-constexpr std::string_view kFixtureSettlementTermsId = "SYNTHETIC_CONTRACT_FIXTURE_SETTLEMENT_TERMS";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_SNAPSHOT")
+constexpr std::string_view kFixtureSnapshotId =
+    "cdbd577fa96ce5166ce248974a9e45e462624c946d8fdfa41e4d791dc5dd02fb";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_CURVE_SET")
+constexpr std::string_view kFixtureCurveSetId =
+    "4b31365193b25dd80080f670782c315d88a1d39410eb7522a5b8428ec9a4530b";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_DISCOUNT_CURVE")
+constexpr std::string_view kFixtureDiscountCurveId =
+    "f5ef93baf24ba14b36186df70bba348537ab2cd2404a61c87abf11935cb2daf4";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_FORECAST_CURVE")
+constexpr std::string_view kFixtureForecastCurveId =
+    "c00a6f7ed9a1bf422798b86ef24e33a7b0ec23cc2088e106da788dc5238645bb";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_FIXING_STORE")
+constexpr std::string_view kFixtureFixingStoreId =
+    "0b6b3d2a2f778177a7b355a197a1c63598b4f1f26725771efab7cb227308e43f";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_VOL_INPUT")
+constexpr std::string_view kFixtureVolatilityInputId =
+    "1ab37d5fbfeb17e5ef9d96170da650fcccb1fdd2303400ed30d59d5d5fde5c9f";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_VOL_INPUT_2")
+constexpr std::string_view kFixtureOtherVolatilityInputId =
+    "55c909eef947eb77323026378d31645a83a389d20b05267cd62e33d8b6a79030";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_MODEL_INPUT")
+constexpr std::string_view kFixtureModelInputId =
+    "1f307a17debf86d945dc143a4d0eaab5409227f03ce2bdfcebc11019391ce938";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_MODEL_INPUT_2")
+constexpr std::string_view kFixtureOtherModelInputId =
+    "24603610fd3dc0b005ae48922455d08b818b253539afc8cbd81998707ba67ba9";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_EXERCISE_TERMS")
+constexpr std::string_view kFixtureExerciseTermsId =
+    "2f70700fb5afd9eec5f8440bc35b1f8f2c70e25c82f3bdbb69ea4aab3bf5a217";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_SETTLEMENT_TERMS")
+constexpr std::string_view kFixtureSettlementTermsId =
+    "5abf821f723c7693dc0bd6f42ebe4673c4faff642e403e6c4fd5373d663b1446";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_CALIBRATION")
+constexpr std::string_view kFixtureCalibrationResultId =
+    "2decd3d1b6d995626630031e6994cddd18ed23424ab9ece76d97f6640173053c";
 // A token this build KNOWS but which names a DIFFERENT contract than the embedded ResolvedSwap.
 constexpr std::string_view kFixtureOtherContractToken = "CURVE_SET_V1";
 constexpr std::string_view kPricingFailedReasonCode = "PRICING_FAILED";
@@ -1225,7 +1252,9 @@ TEST(RiskResultCurveRoleMap, RefusesAMissingDiscountCurveIdEvenWhenRehashed) {
 // ---------------------------------------------------------------------------------------------
 namespace {
 constexpr std::string_view kFixtureUnknownConventionSetId = "SYNTHETIC_NOT_A_CONVENTION_SET";
-constexpr std::string_view kFixtureOtherForecastCurveId = "SYNTHETIC_CONTRACT_FIXTURE_FORECAST_CURVE_2";
+// SHA-256("SYNTHETIC_CONTRACT_FIXTURE_FORECAST_CURVE_2")
+constexpr std::string_view kFixtureOtherForecastCurveId =
+    "e1c190c75daf5584f9f22a85a85c0a8004230b556b4be2d6f211a261a6b96078";
 
 void set_forecast_selection(InputsIdentity& identity,
                             std::map<std::string, std::string> forecast_curve_by_index) {
@@ -1310,6 +1339,90 @@ TEST(ResultInputsIdentityKernelEcho, RefusesAnExtraUnconsumedForecastIndexAfterR
 }
 
 // ---------------------------------------------------------------------------------------------
+// docs/33 sections 12.2/12.4: every inputs_identity id that names a consumed input echoes a derived
+// identity - the SHA-256 the kernel side recomputes and refuses with IDENTITY_MISMATCH when it differs.
+// A result that echoes anything else (free text, or a non-canonical uppercase digest) cannot be linked
+// to any accepted kernel input, so it is refused at the id's own pointer even after a rehash.
+// `resolved_swap_product_id` is a free-text product id, not a derived identity, and stays text.
+// ---------------------------------------------------------------------------------------------
+namespace {
+constexpr std::string_view kFixtureFreeTextId = "arbitrary";
+
+[[nodiscard]] std::string uppercase(std::string_view text) {
+  std::string upper(text);
+  std::transform(upper.begin(), upper.end(), upper.begin(),
+                 [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
+  return upper;
+}
+}  // namespace
+
+TEST(ResultInputsIdentityDerivedIds, AcceptsFingerprintShapedIdsAndAFreeTextProductId) {
+  const RiskResult risk = risk_result_fixture();  // swaption shape: the optional ids are PRESENT
+  ASSERT_TRUE(risk.inputs_identity.volatility_input_id.present);
+  for (const std::string* id :
+       {&risk.inputs_identity.market_snapshot_id, &risk.inputs_identity.curve_set_id,
+        &risk.inputs_identity.fixing_store_id, &risk.inputs_identity.volatility_input_id.value,
+        &risk.inputs_identity.exercise_terms_id.value,
+        &risk.inputs_identity.settlement_terms_id.value}) {
+    EXPECT_TRUE(is_valid_fingerprint(*id)) << *id;
+  }
+  EXPECT_FALSE(is_valid_fingerprint(risk.inputs_identity.resolved_swap_product_id));
+  const CanonicalValue document = risk.to_canonical();
+  const Refusal refusal = decode_risk_result(document);
+  EXPECT_FALSE(refusal.refused) << refusal.pointer << ": " << refusal.message;
+  EXPECT_EQ(RiskResult::from_canonical(document, "").to_canonical().dump(), document.dump());
+}
+
+TEST(ResultInputsIdentityDerivedIds, RefusesAFreeTextOrUppercaseRequiredIdAfterRehash) {
+  for (const std::string& bad : {std::string(kFixtureFreeTextId), uppercase(kFixtureSnapshotId)}) {
+    expect_both_results_refuse(
+        [&bad](InputsIdentity& identity) { identity.market_snapshot_id = bad; },
+        ContractViolationKind::kIdentityMismatch, "/inputs_identity/market_snapshot_id");
+  }
+  expect_both_results_refuse(
+      [](InputsIdentity& identity) { identity.curve_set_id = std::string(kFixtureFreeTextId); },
+      ContractViolationKind::kIdentityMismatch, "/inputs_identity/curve_set_id");
+  expect_both_results_refuse(
+      [](InputsIdentity& identity) { identity.fixing_store_id = std::string(kFixtureFreeTextId); },
+      ContractViolationKind::kIdentityMismatch, "/inputs_identity/fixing_store_id");
+}
+
+TEST(ResultInputsIdentityDerivedIds, RefusesAFreeTextCurveIdInTheRoleMapAfterRehash) {
+  expect_both_results_refuse(
+      [](InputsIdentity& identity) {
+        identity.curve_role_map.discount_curve_id = std::string(kFixtureFreeTextId);
+      },
+      ContractViolationKind::kIdentityMismatch,
+      "/inputs_identity/curve_role_map/discount_curve_id");
+  expect_both_results_refuse(
+      [](InputsIdentity& identity) {
+        set_forecast_selection(identity, {{usd_sofr_key(), std::string(kFixtureFreeTextId)}});
+      },
+      ContractViolationKind::kIdentityMismatch,
+      "/inputs_identity/curve_role_map/forecast_curve_by_index/" + usd_sofr_key());
+}
+
+TEST(ResultInputsIdentityDerivedIds, RefusesAFreeTextPresentOptionalIdAfterRehash) {
+  struct OptionalInput {
+    ValueOrReason<std::string> InputsIdentity::*field;
+    const char* pointer;
+  };
+  const OptionalInput fields[] = {
+      {&InputsIdentity::volatility_input_id, "/inputs_identity/volatility_input_id/value"},
+      {&InputsIdentity::exercise_terms_id, "/inputs_identity/exercise_terms_id/value"},
+      {&InputsIdentity::settlement_terms_id, "/inputs_identity/settlement_terms_id/value"},
+      {&InputsIdentity::model_input_id, "/inputs_identity/model_input_id/value"},
+      {&InputsIdentity::calibration_result_id, "/inputs_identity/calibration_result_id/value"}};
+  for (const OptionalInput& input : fields) {
+    expect_both_results_refuse(
+        [&input](InputsIdentity& identity) {
+          identity.*input.field = ValueOrReason<std::string>::of(std::string(kFixtureFreeTextId));
+        },
+        ContractViolationKind::kIdentityMismatch, input.pointer);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // docs/33 section 12.3: a PRESENT sign convention is the explicit token a signed value is read by, so a
 // PRESENT empty string - on the headline, on pv_sign_convention or on a component reference - names no
 // convention. The open vocabulary itself stays unvalidated; only the empty token is refused.
@@ -1384,7 +1497,7 @@ TEST(PricingResultInputsIdentityApplicability, RefusesAnOisIdentityClaimingTheDe
   for (const OptionalInput& input : fields) {
     PricingResult result = successful_pricing_result(Currency::kUsd);
     ASSERT_EQ(result.product_type, ProductType::kOis);
-    result.inputs_identity.*input.field = ValueOrReason<std::string>::of(std::string("FIXTURE_ID"));
+    result.inputs_identity.*input.field = ValueOrReason<std::string>::of(std::string(kFixtureModelInputId));
     assign_derived_identities(result);
 
     const Refusal refusal = decode_pricing_result(result.to_canonical());
@@ -1544,7 +1657,7 @@ TEST(PricingResultInputsIdentityApplicability,
   PricingResult result = successful_pricing_result(Currency::kUsd);
   ASSERT_FALSE(result.inputs_identity.model_input_id.present);
   result.inputs_identity.calibration_result_id =
-      ValueOrReason<std::string>::of(std::string("SYNTHETIC_CONTRACT_FIXTURE_CALIBRATION"));
+      ValueOrReason<std::string>::of(std::string(kFixtureCalibrationResultId));
   assign_derived_identities(result);
 
   expect_refusal(decode_pricing_result(result.to_canonical()),
@@ -1569,7 +1682,7 @@ TEST(RiskResultInputsIdentityApplicability,
   RiskResult result = failed_risk_result(std::string(kOtherUnavailableCode));
   ASSERT_FALSE(result.inputs_identity.model_input_id.present);
   result.inputs_identity.calibration_result_id =
-      ValueOrReason<std::string>::of(std::string("SYNTHETIC_CONTRACT_FIXTURE_CALIBRATION"));
+      ValueOrReason<std::string>::of(std::string(kFixtureCalibrationResultId));
   assign_derived_identities(result);
 
   expect_refusal(decode_risk_result(result.to_canonical()),

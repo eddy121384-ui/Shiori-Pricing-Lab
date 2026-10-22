@@ -4,6 +4,13 @@
 // (docs/34 section 3.9). The isolation guard enforces that mechanically.
 #include "shiori_rates/quantlib_adapter/adapter.hpp"
 
+// docs/34 section 4.11 O5: QuantLib pragma sites live in headers this boundary instantiates, so an
+// OpenMP flag reaching THIS translation unit would activate them here. The prebuilt QuantLib library
+// itself is verified separately from its object code (tests/ci/assert_library_without_openmp.cmake).
+#if defined(_OPENMP)
+#error "the QuantLib adapter must be compiled without OpenMP (docs/34 section 4.11 O5)"
+#endif
+
 #include <ql/settings.hpp>
 #include <ql/time/date.hpp>
 #include <ql/version.hpp>

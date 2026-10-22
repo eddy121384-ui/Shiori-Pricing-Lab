@@ -309,6 +309,17 @@ void require_status_warning_rule(PricingStatus status, const std::vector<Diagnos
   }
 }
 
+// Sections 12.2/12.4: an inputs_identity id names an exact consumed input. Every such input carries a
+// derived identity - the SHA-256 of its identity preimage - which the kernel side recomputes and refuses
+// with IDENTITY_MISMATCH when the declared id differs (market_identity.cpp, kernel_input.cpp,
+// calibration.cpp). An echo that is not even a fingerprint can therefore name no consumed input.
+void require_derived_input_id(const std::string& id, const std::string& pointer) {
+  if (!is_valid_fingerprint(id)) {
+    fail(ContractViolationKind::kIdentityMismatch, pointer,
+         "an echoed input id must be a derived identity: a 64-character lowercase hex SHA-256");
+  }
+}
+
 // Section 12.3: a PRESENT sign convention is the explicit token a consumer interprets a signed value
 // by, so an empty string names no convention. The open vocabulary itself stays unvalidated.
 void require_nonempty_sign_convention(const ValueOrReason<std::string>& sign_convention,
@@ -368,6 +379,7 @@ CurveRoleMap CurveRoleMap::from_canonical(const CanonicalValue& node, const std:
   result.discount_curve_id = require_text(node.at("discount_curve_id", pointer),
                                           child(pointer, "discount_curve_id"),
                                           "non-empty discount curve id");
+  require_derived_input_id(*result.discount_curve_id, child(pointer, "discount_curve_id"));
   const CanonicalValue& forecast_node = node.at("forecast_curve_by_index", pointer);
   if (!forecast_node.is_object()) {
     fail_wrong_type(child(pointer, "forecast_curve_by_index"), "object", forecast_node.type_name());
@@ -381,6 +393,8 @@ CurveRoleMap CurveRoleMap::from_canonical(const CanonicalValue& node, const std:
       fail_wrong_type(pointer_child(child(pointer, "forecast_curve_by_index"), member.first),
                       "non-empty curve id string", member.second.type_name());
     }
+    require_derived_input_id(member.second.as_string(),
+                             pointer_child(child(pointer, "forecast_curve_by_index"), member.first));
     result.forecast_curve_by_index.emplace(member.first, member.second.as_string());
   }
   if (!result.discount_curve_id.has_value() && result.forecast_curve_by_index.empty()) {
@@ -459,6 +473,9 @@ InputsIdentity InputsIdentity::from_canonical(const CanonicalValue& node, const 
   result.fixing_store_id = require_text(node.at("fixing_store_id", pointer),
                                         child(pointer, "fixing_store_id"),
                                         "string fixing store id");
+  require_derived_input_id(result.market_snapshot_id, child(pointer, "market_snapshot_id"));
+  require_derived_input_id(result.curve_set_id, child(pointer, "curve_set_id"));
+  require_derived_input_id(result.fixing_store_id, child(pointer, "fixing_store_id"));
   result.volatility_input_id = ValueOrReason<std::string>::from_canonical(
       node.at("volatility_input_id", pointer), child(pointer, "volatility_input_id"));
   result.exercise_terms_id = ValueOrReason<std::string>::from_canonical(
@@ -540,6 +557,9 @@ InputsIdentity InputsIdentity::from_canonical(const CanonicalValue& node, const 
     if (id.field->present && id.field->value.empty()) {
       fail(ContractViolationKind::kInvariantViolation, child(child(pointer, id.name), "value"),
            "a PRESENT input identity must be a nonempty string");
+    }
+    if (id.field->present) {
+      require_derived_input_id(id.field->value, child(child(pointer, id.name), "value"));
     }
   }
   return result;
